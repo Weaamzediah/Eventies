@@ -1,0 +1,498 @@
+/**
+ * RequestStrategy.ts
+ * Branch 11 - Strategy Design Pattern
+ * Project: Eventies - Event Services Marketplace
+ *
+ * ─── What is Strategy Pattern? ───────────────────────────────────────────────
+ * The Strategy Pattern defines a family of algorithms (strategies),
+ * encapsulates each one, and makes them interchangeable.
+ * It lets the algorithm vary independently from the clients that use it.
+ *
+ * ─── Why here? ───────────────────────────────────────────────────────────────
+ * Eventies has two types of requests:
+ *   1. Rental Request  → price = pricePerDay × qty × days
+ *   2. Quote Request   → price = unitPrice × qty (no days)
+ *
+ * Instead of writing if/else everywhere, we encapsulate each pricing
+ * and validation logic in its own Strategy class.
+ *
+ * ─── Pattern Structure ────────────────────────────────────────────────────────
+ *
+ *   «interface»
+ *   IRequestStrategy
+ *        │
+ *        ├── RentalRequestStrategy   (calculates rental cost per day)
+ *        └── QuoteRequestStrategy    (calculates quote cost per unit)
+ *
+ *   RequestProcessor   ← uses IRequestStrategy (the "Context")
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+// ─── Shared Types ─────────────────────────────────────────────────────────────
+
+/** A single line item inside any request */
+export interface RequestItem {
+  productId: string;
+  productName: string;
+  quantity: number;
+  unitPrice: number;      // price per day (rental) or per unit (quote)
+  startDate?: string;     // only used in rental requests
+  endDate?: string;       // only used in rental requests
+}
+
+/** Result returned after processing a request */
+export interface RequestResult {
+  type: string;
+  isValid: boolean;
+  errors: string[];
+  totalAmount: number;
+  summary: string;
+}
+
+// ─── Strategy Interface ───────────────────────────────────────────────────────
+
+/**
+ * IRequestStrategy
+ *
+ * Every request strategy must implement these two methods:
+ *   - validate() : checks whether the request data is correct
+ *   - calculate() : computes the total cost
+ */
+export interface IRequestStrategy {
+  /**
+   * Validates the list of items for this request type.
+   * @returns array of error messages (empty = valid)
+   */
+  validate(items: RequestItem[]): string[];
+
+  /**
+   * Calculates the total cost for the given items.
+   * @returns total amount in JOD
+   */
+  calculate(items: RequestItem[]): number;
+
+  /** Human-readable name of this strategy */
+  getTypeName(): string;
+}
+
+// ─── Concrete Strategy 1: Rental Request ─────────────────────────────────────
+
+/**
+ * RentalRequestStrategy
+ *
+ * Used when the customer wants to RENT products for a specific period.
+ *
+ * Pricing formula:
+ *   subtotal per item = unitPrice × quantity × numberOfDays
+ *   total = sum of all subtotals
+ */
+export class RentalRequestStrategy implements IRequestStrategy {
+
+  getTypeName(): string {
+    return "Rental Request";
+  }
+
+  /**
+   * Calculates number of days between two date strings.
+   * Minimum 1 day even if start === end.
+   */
+  private calcDays(startDate: string, endDate: string): number {
+    const start = new Date(startDate).getTime();
+    const end   = new Date(endDate).getTime();
+    const days  = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
+    return Math.max(1, days);
+  }
+
+  validate(items: RequestItem[]): string[] {
+    const errors: string[] = [];
+
+    if (!items || items.length === 0) {
+      errors.push("Rental request must have at least one item.");
+      return errors;
+    }
+
+    items.forEach((item, index) => {
+      // Check quantity
+      if (item.quantity <= 0) {
+        errors.push(`Item ${index + 1} (${item.productName}): quantity must be greater than 0.`);
+      }
+
+      // Check price
+      if (item.unitPrice <= 0) {
+        errors.push(`Item ${index + 1} (${item.productName}): price per day must be greater than 0.`);
+      }
+
+      // Check dates
+      if (!item.startDate) {
+        errors.push(`Item ${index + 1} (${item.productName}): start date is required.`);
+      }
+      if (!item.endDate) {
+        errors.push(`Item ${index + 1} (${item.productName}): end date is required.`);
+      }
+      if (item.startDate && item.endDate) {
+        const start = new Date(item.startDate);
+        const end   = new Date(item.endDate);
+        if (end < start) {
+          errors.push(`Item ${index + 1} (${item.productName}): end date cannot be before start date.`);
+        }
+      }
+    });
+
+    return errors;
+  }
+
+  calculate(items: RequestItem[]): number {
+    return items.reduce((total, item) => {
+      const days     = this.calcDays(item.startDate!, item.endDate!);
+      const subtotal = item.unitPrice * item.quantity * days;
+      return total + subtotal;
+    }, 0);
+  }
+}
+
+// ─── Concrete Strategy 2: Quote Request ──────────────────────────────────────
+
+/**
+ * QuoteRequestStrategy
+ *
+ * Used when the customer wants a PRICE QUOTE for purchasing products.
+ * No rental dates needed — just quantity × unit price.
+ *
+ * Pricing formula:
+ *   subtotal per item = unitPrice × quantity
+ *   total = sum of all subtotals
+ */
+export class QuoteRequestStrategy implements IRequestStrategy {
+
+  getTypeName(): string {
+    return "Quote Request";
+  }
+
+  validate(items: RequestItem[]): string[] {
+    const errors: string[] = [];
+
+    if (!items || items.length === 0) {
+      errors.push("Quote request must have at least one item.");
+      return errors;
+    }
+
+    items.forEach((item, index) => {
+      if (item.quantity <= 0) {
+        errors.push(`Item ${index + 1} (${item.productName}): quantity must be greater than 0.`);
+      }
+      if (item.unitPrice <= 0) {
+        errors.push(`Item ${index + 1} (${item.productName}): unit price must be greater than 0.`);
+      }
+    });
+
+    return errors;
+  }
+
+  calculate(items: RequestItem[]): number {
+    return items.reduce((total, item) => {
+      return total + item.unitPrice * item.quantity;
+    }, 0);
+  }
+}
+
+// ─── Context: RequestProcessor ────────────────────────────────────────────────
+
+/**
+ * RequestProcessor (Context class)
+ *
+ * This is the "context" in the Strategy Pattern.
+ * It holds a reference to a strategy and delegates
+ * validation and calculation to it.
+ *
+ * The strategy can be swapped at runtime — no need
+ * to change this class when adding new request types.
+ */
+export class RequestProcessor {
+  private strategy: IRequestStrategy;
+
+  /**
+   * @param strategy - The strategy to use for this request
+   */
+  constructor(strategy: IRequestStrategy) {
+    this.strategy = strategy;
+  }
+
+  /**
+   * Allows switching the strategy at runtime.
+   * Example: switching from Rental to Quote mode
+   */
+  setStrategy(strategy: IRequestStrategy): void {
+    this.strategy = strategy;
+  }
+
+  /**
+   * Processes the request:
+   * 1. Validates items using the current strategy
+   * 2. Calculates total if valid
+   * 3. Returns a RequestResult with all details
+   */
+  process(items: RequestItem[]): RequestResult {
+    const errors      = this.strategy.validate(items);
+    const isValid     = errors.length === 0;
+    const totalAmount = isValid ? this.strategy.calculate(items) : 0;
+    const typeName    = this.strategy.getTypeName();
+
+    const summary = isValid
+      ? `${typeName} processed successfully. Total: JD ${totalAmount.toFixed(2)}.`
+      : `${typeName} failed validation. ${errors.length} error(s) found.`;
+
+    return { type: typeName, isValid, errors, totalAmount, summary };
+  }
+}
+
+// ─── Usage Examples ───────────────────────────────────────────────────────────
+
+/**
+ * Demonstrates how the Strategy Pattern works in Eventies.
+ * This function would typically be called from a service or a React hook.
+ */
+export function runStrategyDemo(): void {
+
+  // ── Example 1: Rental Request ──────────────────────────────────────────────
+  console.log("═══════════════════════════════════════");
+  console.log("  EXAMPLE 1 — Rental Request Strategy  ");
+  console.log("═══════════════════════════════════════");
+
+  const rentalItems: RequestItem[] = [
+    {
+      productId:   "p1",
+      productName: "Elegant Tent 10x10m",
+      quantity:    2,
+      unitPrice:   150,     // JD 150 per day
+      startDate:   "2026-06-01",
+      endDate:     "2026-06-03",  // 2 days
+    },
+    {
+      productId:   "p2",
+      productName: "Round Banquet Tables (set of 10)",
+      quantity:    1,
+      unitPrice:   80,      // JD 80 per day
+      startDate:   "2026-06-01",
+      endDate:     "2026-06-03",  // 2 days
+    },
+  ];
+
+  const rentalProcessor = new RequestProcessor(new RentalRequestStrategy());
+  const rentalResult    = rentalProcessor.process(rentalItems);
+
+  console.log("Valid?  ", rentalResult.isValid);
+  console.log("Total:   JD", rentalResult.totalAmount);
+  // Expected: (150×2×2) + (80×1×2) = 600 + 160 = JD 760
+  console.log("Summary:", rentalResult.summary);
+
+  // ── Example 2: Quote Request ───────────────────────────────────────────────
+  console.log("\n═══════════════════════════════════════");
+  console.log("  EXAMPLE 2 — Quote Request Strategy   ");
+  console.log("═══════════════════════════════════════");
+
+  const quoteItems: RequestItem[] = [
+    {
+      productId:   "p3",
+      productName: "Premium Sound System",
+      quantity:    1,
+      unitPrice:   1200,   // JD 1200 per unit
+    },
+    {
+      productId:   "p4",
+      productName: "LED Stage Lighting Kit",
+      quantity:    3,
+      unitPrice:   450,    // JD 450 per unit
+    },
+  ];
+
+  // Switch strategy at runtime — same processor, different strategy
+  const quoteProcessor = new RequestProcessor(new QuoteRequestStrategy());
+  const quoteResult    = quoteProcessor.process(quoteItems);
+
+  console.log("Valid?  ", quoteResult.isValid);
+  console.log("Total:   JD", quoteResult.totalAmount);
+  // Expected: (1200×1) + (450×3) = 1200 + 1350 = JD 2550
+  console.log("Summary:", quoteResult.summary);
+
+  // ── Example 3: Validation failure ─────────────────────────────────────────
+  console.log("\n════════════════════════# ─────────────────────────────────────────────────────────────────────────────
+# ci.yml
+# Branch 13 - DevOps / GitHub Actions
+# Project: Eventies - Event Services Marketplace
+#
+# What this file does:
+#   This is a CI/CD (Continuous Integration / Continuous Deployment) pipeline.
+#   It runs automatically on GitHub every time code is pushed or a Pull Request
+#   is opened on the "main" branch.
+#
+# Pipeline Steps:
+#   1. Checkout code from the repository
+#   2. Setup Node.js environment
+#   3. Install dependencies (npm install)
+#   4. Check TypeScript types
+#   5. Build the production bundle (npm run build)
+#   6. Upload build artifacts
+#
+# Why CI/CD?
+#   - Catches bugs early before they reach production
+#   - Ensures the app always builds successfully
+#   - Automates repetitive tasks (no manual build needed)
+#   - Every push is automatically verified
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Eventies CI Pipeline
+
+# ── Triggers ──────────────────────────────────────────────────────────────────
+# This workflow runs when:
+#   - Code is pushed to the "main" branch
+#   - A Pull Request is opened targeting "main"
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+# ── Jobs ──────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── Job 1: Build & Test ─────────────────────────────────────────────────────
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest   # Use the latest Ubuntu virtual machine
+
+    steps:
+
+      # Step 1: Get the code from the repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Install Node.js (version 20)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"        # Cache node_modules to speed up future runs
+
+      # Step 3: Install all project dependencies
+      - name: Install dependencies
+        run: npm ci
+        # "npm ci" is like "npm install" but faster and stricter
+        # It uses package-lock.json exactly — good for CI environments
+
+      # Step 4: Check TypeScript types
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+        # --noEmit: check types but don't generate output files
+
+      # Step 5: Build the production bundle
+      - name: Build project
+        run: npm run build
+        env:
+          # Use GitHub Secrets for real values (set them in repo Settings)
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+
+      # Step 6: Upload the build output as a downloadable artifact
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eventies-build
+          path: dist/           # Vite outputs the build to the "dist" folder
+          retention-days: 7     # Keep artifact for 7 days
+
+  # ── Job 2: Code Quality Check ───────────────────────────────────────────────
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    needs: build-and-test     # Only runs if Job 1 succeeds
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Verify the project structure is correct
+      - name: Verify project structure
+        run: |
+          echo "Checking project structure..."
+          ls -la src/
+          echo "Checking components..."
+          ls -la src/components/
+          echo "Project structure looks good!"
+
+  # ── Job 3: Deployment Ready Check ──────────────────────────────────────────
+  deployment-check:
+    name: Deployment Ready
+    runs-on: ubuntu-latest
+    needs: [build-and-test, code-quality]  # Runs after both jobs succeed
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build for production
+        run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+
+      # Check that the build output exists and has files
+      - name: Verify build output
+        run: |
+          echo "Checking build output..."
+          ls -la dist/
+          echo "Build size:"
+          du -sh dist/
+          echo "Build is ready for deployment!"
+
+      # Print a success summary
+      - name: Pipeline Summary
+        run: |
+          echo "Eventies CI Pipeline Complete"
+          echo "Code checked out"
+          echo "Dependencies installed"
+          echo "TypeScript types verified"
+          echo "Production build successful"
+          echo "Build artifact uploaded"
+          echo "Ready for deployment to Vercel"═══════════════");
+  console.log("  EXAMPLE 3 — Validation Failure       ");
+  console.log("═══════════════════════════════════════");
+
+  const badRentalItems: RequestItem[] = [
+    {
+      productId:   "p1",
+      productName: "Elegant Tent",
+      quantity:    0,         // ← invalid: quantity is 0
+      unitPrice:   150,
+      startDate:   "2026-06-05",
+      endDate:     "2026-06-03",  // ← invalid: end before start
+    },
+  ];
+
+  const badResult = rentalProcessor.process(badRentalItems);
+  console.log("Valid?  ", badResult.isValid);        // false
+  console.log("Errors: ", badResult.errors);
+  console.log("Summary:", badResult.summary);
+}
